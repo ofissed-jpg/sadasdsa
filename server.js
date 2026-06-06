@@ -72,6 +72,18 @@ db.run(`CREATE TABLE IF NOT EXISTS invite_codes (
     console.error('Ошибка создания таблицы инвайтов:', err);
   } else {
     console.log('✓ Таблица invite_codes готова');
+    
+    // Создаём первый инвайт код для регистрации админа
+    db.get('SELECT COUNT(*) as count FROM invite_codes', [], (err, row) => {
+      if (!err && row.count === 0) {
+        const firstCode = 'INVITE-ROCKET1';
+        db.run('INSERT INTO invite_codes (code, created_by) VALUES (?, ?)', [firstCode, 1337], (err) => {
+          if (!err) {
+            console.log('✓ Создан первый инвайт код:', firstCode);
+          }
+        });
+      }
+    });
   }
 });
 
