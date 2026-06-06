@@ -1,0 +1,13 @@
+node_modules/
+*.db
+.env
+*.log
+.DS_Store
+*.tmp
+*_backup.html
+*_broken.html
+patch_html.js
+update_db.js
+final_update.js
+create_invite.sql
+ИНСТРУКЦИЯ_ПО_ОБНОВЛЕНИЮ.txt

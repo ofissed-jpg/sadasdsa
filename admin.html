@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Админ Панель - Damp Neuro</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { 
+    background: #0c0c10; 
+    color: #e8e8f0; 
+    font-family: 'Arial', sans-serif; 
+    padding: 20px;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  .header { 
+    background: #13131a; 
+    padding: 20px; 
+    border-radius: 12px; 
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .header h1 { font-size: 24px; }
+  .btn { 
+    padding: 10px 20px; 
+    border: none; 
+    border-radius: 8px; 
+    cursor: pointer; 
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .btn-primary { background: #6C63FF; color: white; }
+  .btn-danger { background: #ff6b6b; color: white; }
+  .btn-success { background: #51cf66; color: white; }
+  .tabs { 
+    display: flex; 
+    gap: 10px; 
+    margin-bottom: 20px;
+  }
+  .tab { 
+    padding: 12px 24px; 
+    background: #13131a; 
+    border: none; 
+    border-radius: 8px; 
+    color: #8888a0; 
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .tab.active { background: #6C63FF; color: white; }
+  .content { 
+    background: #13131a; 
+    padding: 20px; 
+    border-radius: 12px;
+  }
+  .list { display: flex; flex-direction: column; gap: 12px; }
+  .item { 
+    background: #1a1a24; 
+    padding: 16px; 
+    border-radius: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .item-info { flex: 1; }
+  .item-actions { display: flex; gap: 8px; }
+  .badge { 
+    display: inline-block; 
+    padding: 4px 8px; 
+    border-radius: 4px; 
+    font-size: 11px; 
+    font-weight: 600; 
+    margin-left: 8px;
+  }
+  .badge-admin { background: rgba(108,99,255,0.2); color: #9D97FF; }
+  .badge-banned { background: rgba(255,107,107,0.2); color: #ff6b6b; }
+  .badge-premium { background: rgba(255,215,0,0.2); color: #ffd700; }
+  input[type="text"], input[type="number"] { 
+    background: #1a1a24; 
+    border: 1px solid #252535; 
+    padding: 10px; 
+    border-radius: 6px; 
+    color: white;
+    font-size: 14px;
+  }
+  .device { 
+    font-size: 11px; 
+    color: #8888a0; 
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>🛠 Админ Панель</h1>
+    <button class="btn btn-primary" onclick="location.href='/'">← Назад к чату</button>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('invites')">🎟 Инвайт коды</button>
+    <button class="tab" onclick="switchTab('users')">👥 Пользователи</button>
+  </div>
+
+  <div class="content">
+    <!-- TAB: Инвайты -->
+    <div id="tab-invites">
+      <button class="btn btn-primary" onclick="generateInvite()" style="margin-bottom: 20px;">+ Создать инвайт код</button>
+      <div id="invitesList" class="list"></div>
+    </div>
+
+    <!-- TAB: Пользователи -->
+    <div id="tab-users" style="display:none;">
+      <input type="text" placeholder="🔍 Поиск..." onkeyup="filterUsers(this.value)" style="width: 100%; margin-bottom: 20px;">
+      <div id="usersList" class="list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API_URL = 'http://localhost:3000/api';
+const SESSION_KEY = 'damp_neuro_session';
+let allUsers = [];
+
+function getSession() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } 
+  catch { return null; }
+}
+
+// Проверка админа
+const user = getSession();
+if (!user || !user.isAdmin) {
+  alert('Доступ запрещён!');
+  location.href = '/';
+}
+
+// Переключение табов
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('[id^="tab-"]').forEach(c => c.style.display = 'none');
+  
+  if (tab === 'invites') {
+    document.querySelectorAll('.tab')[0].classList.add('active');
+    document.getElementById('tab-invites').style.display = 'block';
+    loadInvites();
+  } else if (tab === 'users') {
+    document.querySelectorAll('.tab')[1].classList.add('active');
+    document.getElementById('tab-users').style.display = 'block';
+    loadUsers();
+  }
+}
+
+// ИНВАЙТЫ
+async function generateInvite() {
+  try {
+    const response = await fetch(`${API_URL}/generate-invite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id })
+    });
+    const data = await response.json();
+    if (response.ok) {
+      loadInvites();
+    } else {
+      alert(data.error);
+    }
+  } catch (error) {
+    alert('Ошибка: ' + error.message);
+  }
+}
+
+async function loadInvites() {
+  try {
+    const response = await fetch(`${API_URL}/invite-codes/${user.id}`);
+    const codes = await response.json();
+    
+    const list = document.getElementById('invitesList');
+    list.innerHTML = '';
+    
+    codes.forEach(code => {
+      const item = document.createElement('div');
+      item.className = 'item';
+      item.innerHTML = `
+        <div class="item-info">
+          <div style="font-weight:600; font-family:monospace;">${code.code}</div>
+          <div style="font-size:12px; color:#8888a0;">
+            ${code.used_at ? 'Использован: ' + code.used_by_username : 'Не использован'}
+          </div>
+        </div>
+        <div class="item-actions">
+          <button class="btn btn-primary" onclick="copyCode('${code.code}')">Копировать</button>
+          <button class="btn btn-danger" onclick="deleteInvite('${code.code}')">Удалить</button>
+        </div>
+      `;
+      list.appendChild(item);
+    });
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function copyCode(code) {
+  navigator.clipboard.writeText(code);
+  alert('Код скопирован: ' + code);
+}
+
+async function deleteInvite(code) {
+  if (!confirm('Удалить код ' + code + '?')) return;
+  
+  try {
+    const response = await fetch(`${API_URL}/invite-codes/${code}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id })
+    });
+    if (response.ok) {
+      loadInvites();
+    }
+  } catch (error) {
+    alert('Ошибка удаления');
+  }
+}
+
+// ПОЛЬЗОВАТЕЛИ
+async function loadUsers() {
+  try {
+    const response = await fetch(`${API_URL}/admin/users/${user.id}`);
+    allUsers = await response.json();
+    renderUsers(allUsers);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function renderUsers(users) {
+  const list = document.getElementById('usersList');
+  list.innerHTML = '';
+  
+  users.forEach(u => {
+    const item = document.createElement('div');
+    item.className = 'item';
+    
+    let badges = '';
+    if (u.isAdmin) badges += '<span class="badge badge-admin">ADMIN</span>';
+    if (u.isBanned) badges += '<span class="badge badge-banned">BANNED</span>';
+    if (u.subscriptionUntil && new Date(u.subscriptionUntil) > new Date()) {
+      badges += '<span class="badge badge-premium">PREMIUM</span>';
+    }
+    
+    item.innerHTML = `
+      <div class="item-info">
+        <div style="font-weight:600;">${u.name} ${badges}</div>
+        <div style="font-size:12px; color:#8888a0;">@${u.username} • ID: ${u.id}</div>
+        <div class="device" onclick="loadDevices(${u.id})" style="cursor:pointer;">📱 Показать устройства</div>
+        <div id="devices-${u.id}" style="display:none; margin-top:8px;"></div>
+      </div>
+      <div class="item-actions">
+        <button class="btn ${u.isBanned ? 'btn-success' : 'btn-danger'}" onclick="toggleBan(${u.id}, ${!u.isBanned})">
+          ${u.isBanned ? 'Разбанить' : 'Забанить'}
+        </button>
+        <input type="number" id="days-${u.id}" placeholder="Дни" min="1" max="365" style="width:80px;">
+        <button class="btn btn-primary" onclick="giveSub(${u.id})">Подписка</button>
+      </div>
+    `;
+    list.appendChild(item);
+  });
+}
+
+function filterUsers(query) {
+  const filtered = allUsers.filter(u => 
+    u.name.toLowerCase().includes(query.toLowerCase()) ||
+    u.username.toLowerCase().includes(query.toLowerCase())
+  );
+  renderUsers(filtered);
+}
+
+async function toggleBan(userId, banned) {
+  try {
+    const response = await fetch(`${API_URL}/admin/ban`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminId: user.id, userId, banned })
+    });
+    if (response.ok) {
+      loadUsers();
+      alert(banned ? 'Пользователь забанен' : 'Пользователь разбанен');
+    }
+  } catch (error) {
+    alert('Ошибка');
+  }
+}
+
+async function giveSub(userId) {
+  const days = parseInt(document.getElementById(`days-${userId}`).value);
+  if (!days || days < 1) {
+    alert('Укажи количество дней');
+    return;
+  }
+  
+  try {
+    const response = await fetch(`${API_URL}/admin/subscription`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminId: user.id, userId, days })
+    });
+    if (response.ok) {
+      loadUsers();
+      alert(`Подписка выдана на ${days} дней`);
+    }
+  } catch (error) {
+    alert('Ошибка');
+  }
+}
+
+async function loadDevices(userId) {
+  const devDiv = document.getElementById(`devices-${userId}`);
+  if (devDiv.style.display === 'block') {
+    devDiv.style.display = 'none';
+    return;
+  }
+  
+  try {
+    const response = await fetch(`${API_URL}/admin/devices/${userId}?adminId=${user.id}`);
+    const devices = await response.json();
+    
+    devDiv.innerHTML = devices.map(d => `
+      <div style="background:#0c0c10; padding:8px; border-radius:4px; margin-top:4px;">
+        <div style="font-weight:600; color:#9D97FF;">IP: ${d.ip_address || 'Unknown'}</div>
+        <div style="font-size:10px;">${d.user_agent || 'Unknown'}</div>
+        <div style="font-size:10px; color:#666;">Последний вход: ${new Date(d.last_login).toLocaleString('ru')}</div>
+      </div>
+    `).join('');
+    
+    devDiv.style.display = 'block';
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Загрузка при старте
+loadInvites();
+</script>
+</body>
+</html>
