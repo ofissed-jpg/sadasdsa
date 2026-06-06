@@ -317,11 +317,14 @@
     
     err.textContent = 'Регистрация...';
     
+    // Собираем информацию об устройстве
+    const deviceInfo = await collectDeviceInfo();
+    
     try {
       const response = await fetch(`${API_URL}/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, username, password, inviteCode })
+        body: JSON.stringify({ name, username, password, inviteCode, deviceInfo })
       });
       
       const data = await response.json();
@@ -351,11 +354,14 @@
     
     err.textContent = 'Вход...';
     
+    // Собираем информацию об устройстве
+    const deviceInfo = await collectDeviceInfo();
+    
     try {
       const response = await fetch(`${API_URL}/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify({ username, password, deviceInfo })
       });
       
       const data = await response.json();
@@ -371,6 +377,36 @@
       err.textContent = 'Ошибка соединения с сервером';
       console.error('Ошибка входа:', error);
     }
+  }
+
+  // Сбор информации об устройстве
+  async function collectDeviceInfo() {
+    const info = {
+      screenResolution: `${screen.width}x${screen.height}`,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      platform: navigator.platform,
+      language: navigator.language,
+      deviceMemory: navigator.deviceMemory || 'Unknown',
+      hardwareConcurrency: navigator.hardwareConcurrency || 'Unknown',
+      connectionType: navigator.connection ? navigator.connection.effectiveType : 'Unknown'
+    };
+
+    // Попытка получить информацию о батарее
+    if ('getBattery' in navigator) {
+      try {
+        const battery = await navigator.getBattery();
+        info.batteryLevel = Math.round(battery.level * 100);
+        info.batteryCharging = battery.charging;
+      } catch (e) {
+        info.batteryLevel = null;
+        info.batteryCharging = false;
+      }
+    } else {
+      info.batteryLevel = null;
+      info.batteryCharging = false;
+    }
+
+    return info;
   }
 
   function loginUser(user) {
