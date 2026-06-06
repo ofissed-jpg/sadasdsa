@@ -259,6 +259,9 @@ function renderUsers(users) {
         <button class="btn ${u.isBanned ? 'btn-success' : 'btn-danger'}" onclick="toggleBan(${u.id}, ${!u.isBanned})">
           ${u.isBanned ? 'Разбанить' : 'Забанить'}
         </button>
+        <button class="btn ${u.isAdmin ? 'btn-danger' : 'btn-primary'}" onclick="toggleAdmin(${u.id}, ${!u.isAdmin})">
+          ${u.isAdmin ? 'Забрать админку' : 'Выдать админку'}
+        </button>
         <input type="number" id="days-${u.id}" placeholder="Дни" min="1" max="365" style="width:80px;">
         <button class="btn btn-primary" onclick="giveSub(${u.id})">Подписка</button>
       </div>
@@ -285,6 +288,24 @@ async function toggleBan(userId, banned) {
     if (response.ok) {
       loadUsers();
       alert(banned ? 'Пользователь забанен' : 'Пользователь разбанен');
+    }
+  } catch (error) {
+    alert('Ошибка');
+  }
+}
+
+async function toggleAdmin(userId, makeAdmin) {
+  if (!confirm(makeAdmin ? 'Выдать админку этому пользователю?' : 'Забрать админку у этого пользователя?')) return;
+  
+  try {
+    const response = await fetch(`${API_URL}/admin/toggle-admin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminId: user.id, userId, makeAdmin })
+    });
+    if (response.ok) {
+      loadUsers();
+      alert(makeAdmin ? 'Админка выдана' : 'Админка забрана');
     }
   } catch (error) {
     alert('Ошибка');
@@ -324,13 +345,33 @@ async function loadDevices(userId) {
     const response = await fetch(`${API_URL}/admin/devices/${userId}?adminId=${user.id}`);
     const devices = await response.json();
     
-    devDiv.innerHTML = devices.map(d => `
-      <div style="background:#0c0c10; padding:8px; border-radius:4px; margin-top:4px;">
-        <div style="font-weight:600; color:#9D97FF;">IP: ${d.ip_address || 'Unknown'}</div>
-        <div style="font-size:10px;">${d.user_agent || 'Unknown'}</div>
-        <div style="font-size:10px; color:#666;">Последний вход: ${new Date(d.last_login).toLocaleString('ru')}</div>
-      </div>
-    `).join('');
+    devDiv.innerHTML = devices.map(d => {
+      let info = '';
+      try {
+        const parsed = JSON.parse(d.device_info || '{}');
+        info = `
+          <div style="font-size:10px; color:#8888a0; margin-top:4px;">
+            ${d.screen_resolution ? `📱 Экран: ${d.screen_resolution}` : ''}
+            ${d.timezone ? ` | 🕐 Часовой пояс: ${d.timezone}` : ''}
+            ${d.platform ? ` | 💻 Платформа: ${d.platform}` : ''}
+            ${d.language ? ` | 🌍 Язык: ${d.language}` : ''}
+            ${d.battery_level ? ` | 🔋 Батарея: ${d.battery_level}% ${d.battery_charging ? '⚡' : ''}` : ''}
+            ${d.device_memory ? ` | 🧠 RAM: ${d.device_memory} GB` : ''}
+            ${d.hardware_concurrency ? ` | ⚙️ Ядра: ${d.hardware_concurrency}` : ''}
+            ${d.connection_type ? ` | 📶 Связь: ${d.connection_type}` : ''}
+          </div>
+        `;
+      } catch (e) {}
+      
+      return `
+        <div style="background:#0c0c10; padding:8px; border-radius:4px; margin-top:4px;">
+          <div style="font-weight:600; color:#9D97FF;">IP: ${d.ip_address || 'Unknown'}</div>
+          <div style="font-size:10px;">${d.user_agent || 'Unknown'}</div>
+          ${info}
+          <div style="font-size:10px; color:#666;">Последний вход: ${new Date(d.last_login).toLocaleString('ru')}</div>
+        </div>
+      `;
+    }).join('');
     
     devDiv.style.display = 'block';
   } catch (error) {
