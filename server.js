@@ -7,7 +7,7 @@ const multer = require('multer');
 const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
 // Middleware
 app.use(cors());
@@ -526,7 +526,7 @@ app.get('/api/users', (req, res) => {
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
   console.log(`\n🚀 Сервер запущен на http://localhost:${PORT}`);
   console.log(`📊 База данных: users.db\n`);
 });
