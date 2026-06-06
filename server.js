@@ -241,7 +241,7 @@ app.post('/api/register', async (req, res) => {
 });
 
 // API: Вход
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
 
   if (!username || !password) {
@@ -251,98 +251,86 @@ app.post('/api/login', (req, res) => {
   const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
   const userAgent = req.headers['user-agent'];
 
-  // Проверка страны по IP
-  const checkCountryAndLogin = async () => {
-    // Сначала проверяем, не админ ли это
-    const checkAdmin = await new Promise((resolve) => {
-      db.get('SELECT is_admin FROM users WHERE username = ?', [username.toLowerCase()], (err, user) => {
-        if (err || !user) resolve(false);
-        else resolve(user.is_admin === 1);
-      });
-    });
-
-    // Если не админ - проверяем страну
-    if (!checkAdmin) {
-      try {
-        const ipToCheck = ipAddress.includes(',') ? ipAddress.split(',')[0].trim() : ipAddress;
-        const ipClean = ipToCheck.replace('::ffff:', '');
-        
-        if (ipClean !== '127.0.0.1' && ipClean !== 'localhost' && !ipClean.startsWith('192.168')) {
-          const geoResponse = await fetch(`http://ip-api.com/json/${ipClean}?fields=status,country,countryCode`);
-          const geoData = await geoResponse.json();
-          
-          if (geoData.status === 'success') {
-            const cis = ['RU', 'BY', 'KZ', 'AM', 'AZ', 'KG', 'MD', 'TJ', 'TM', 'UZ', 'UA'];
-            if (!cis.includes(geoData.countryCode)) {
-              return res.status(403).json({ error: 'Выключите VPN для продолжения использования сайтом!' });
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Ошибка проверки IP:', error);
-      }
+  // Сначала получаем пользователя и проверяем пароль
+  db.get('SELECT * FROM users WHERE username = ?', [username.toLowerCase()], async (err, user) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
     }
 
-    db.get('SELECT * FROM users WHERE username = ?', [username.toLowerCase()], async (err, user) => {
-      if (err) {
-        return res.status(500).json({ error: 'Ошибка сервера' });
-      }
+    if (!user) {
+      return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
+    }
 
-      if (!user) {
+    // Проверка на бан
+    if (user.is_banned === 1) {
+      return res.status(403).json({ error: 'Ваш аккаунт заблокирован' });
+    }
+
+    try {
+      const match = await bcrypt.compare(password, user.password);
+      
+      if (!match) {
         return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
       }
 
-      // Проверка на бан
-      if (user.is_banned === 1) {
-        return res.status(403).json({ error: 'Ваш аккаунт заблокирован' });
-      }
-
-      try {
-        const match = await bcrypt.compare(password, user.password);
-        
-        if (!match) {
-          return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
+      // ТЕПЕРЬ проверяем страну, НО только если НЕ админ
+      if (user.is_admin !== 1) {
+        try {
+          const ipToCheck = ipAddress.includes(',') ? ipAddress.split(',')[0].trim() : ipAddress;
+          const ipClean = ipToCheck.replace('::ffff:', '');
+          
+          if (ipClean !== '127.0.0.1' && ipClean !== 'localhost' && !ipClean.startsWith('192.168')) {
+            const geoResponse = await fetch(`http://ip-api.com/json/${ipClean}?fields=status,country,countryCode`);
+            const geoData = await geoResponse.json();
+            
+            if (geoData.status === 'success') {
+              const cis = ['RU', 'BY', 'KZ', 'AM', 'AZ', 'KG', 'MD', 'TJ', 'TM', 'UZ', 'UA'];
+              if (!cis.includes(geoData.countryCode)) {
+                return res.status(403).json({ error: 'Выключите VPN для продолжения использования сайтом!' });
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Ошибка проверки IP:', error);
         }
-
-        // Обновляем устройство с полной информацией
-        const devInfo = req.body.deviceInfo || {};
-        db.run(`INSERT INTO user_devices (
-          user_id, ip_address, user_agent, device_info, 
-          screen_resolution, timezone, platform, 
-          battery_level, battery_charging, device_memory, 
-          hardware_concurrency, connection_type, language, last_login
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, [
-          user.id, 
-          ipAddress, 
-          userAgent,
-          JSON.stringify(devInfo),
-          devInfo.screenResolution || null,
-          devInfo.timezone || null,
-          devInfo.platform || null,
-          devInfo.batteryLevel || null,
-          devInfo.batteryCharging ? 1 : 0,
-          devInfo.deviceMemory || null,
-          devInfo.hardwareConcurrency || null,
-          devInfo.connectionType || null,
-          devInfo.language || null
-        ]);
-
-        res.json({
-          id: user.id,
-          name: user.name,
-          username: user.username,
-          isAdmin: user.is_admin === 1,
-          isBanned: user.is_banned === 1,
-          subscriptionUntil: user.subscription_until,
-          created: new Date(user.created_at).toLocaleDateString('ru')
-        });
-      } catch (error) {
-        res.status(500).json({ error: 'Ошибка сервера' });
       }
-    });
-  };
 
-  checkCountryAndLogin();
+      // Обновляем устройство с полной информацией
+      const devInfo = req.body.deviceInfo || {};
+      db.run(`INSERT INTO user_devices (
+        user_id, ip_address, user_agent, device_info, 
+        screen_resolution, timezone, platform, 
+        battery_level, battery_charging, device_memory, 
+        hardware_concurrency, connection_type, language, last_login
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, [
+        user.id, 
+        ipAddress, 
+        userAgent,
+        JSON.stringify(devInfo),
+        devInfo.screenResolution || null,
+        devInfo.timezone || null,
+        devInfo.platform || null,
+        devInfo.batteryLevel || null,
+        devInfo.batteryCharging ? 1 : 0,
+        devInfo.deviceMemory || null,
+        devInfo.hardwareConcurrency || null,
+        devInfo.connectionType || null,
+        devInfo.language || null
+      ]);
+
+      res.json({
+        id: user.id,
+        name: user.name,
+        username: user.username,
+        isAdmin: user.is_admin === 1,
+        isBanned: user.is_banned === 1,
+        subscriptionUntil: user.subscription_until,
+        created: new Date(user.created_at).toLocaleDateString('ru')
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
+  });
 });
 
 // Главная страница
