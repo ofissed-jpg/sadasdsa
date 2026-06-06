@@ -253,23 +253,34 @@ app.post('/api/login', (req, res) => {
 
   // Проверка страны по IP
   const checkCountryAndLogin = async () => {
-    try {
-      const ipToCheck = ipAddress.includes(',') ? ipAddress.split(',')[0].trim() : ipAddress;
-      const ipClean = ipToCheck.replace('::ffff:', '');
-      
-      if (ipClean !== '127.0.0.1' && ipClean !== 'localhost' && !ipClean.startsWith('192.168')) {
-        const geoResponse = await fetch(`http://ip-api.com/json/${ipClean}?fields=status,country,countryCode`);
-        const geoData = await geoResponse.json();
+    // Сначала проверяем, не админ ли это
+    const checkAdmin = await new Promise((resolve) => {
+      db.get('SELECT is_admin FROM users WHERE username = ?', [username.toLowerCase()], (err, user) => {
+        if (err || !user) resolve(false);
+        else resolve(user.is_admin === 1);
+      });
+    });
+
+    // Если не админ - проверяем страну
+    if (!checkAdmin) {
+      try {
+        const ipToCheck = ipAddress.includes(',') ? ipAddress.split(',')[0].trim() : ipAddress;
+        const ipClean = ipToCheck.replace('::ffff:', '');
         
-        if (geoData.status === 'success') {
-          const cis = ['RU', 'BY', 'KZ', 'AM', 'AZ', 'KG', 'MD', 'TJ', 'TM', 'UZ', 'UA'];
-          if (!cis.includes(geoData.countryCode)) {
-            return res.status(403).json({ error: 'Выключите VPN для продолжения использования сайтом!' });
+        if (ipClean !== '127.0.0.1' && ipClean !== 'localhost' && !ipClean.startsWith('192.168')) {
+          const geoResponse = await fetch(`http://ip-api.com/json/${ipClean}?fields=status,country,countryCode`);
+          const geoData = await geoResponse.json();
+          
+          if (geoData.status === 'success') {
+            const cis = ['RU', 'BY', 'KZ', 'AM', 'AZ', 'KG', 'MD', 'TJ', 'TM', 'UZ', 'UA'];
+            if (!cis.includes(geoData.countryCode)) {
+              return res.status(403).json({ error: 'Выключите VPN для продолжения использования сайтом!' });
+            }
           }
         }
+      } catch (error) {
+        console.error('Ошибка проверки IP:', error);
       }
-    } catch (error) {
-      console.error('Ошибка проверки IP:', error);
     }
 
     db.get('SELECT * FROM users WHERE username = ?', [username.toLowerCase()], async (err, user) => {
