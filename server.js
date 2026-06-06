@@ -94,6 +94,15 @@ db.run(`CREATE TABLE IF NOT EXISTS user_devices (
   ip_address TEXT,
   user_agent TEXT,
   device_info TEXT,
+  screen_resolution TEXT,
+  timezone TEXT,
+  platform TEXT,
+  battery_level INTEGER,
+  battery_charging INTEGER,
+  device_memory TEXT,
+  hardware_concurrency INTEGER,
+  connection_type TEXT,
+  language TEXT,
   last_login DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id)
 )`, (err) => {
@@ -106,7 +115,7 @@ db.run(`CREATE TABLE IF NOT EXISTS user_devices (
 
 // API: Регистрация
 app.post('/api/register', async (req, res) => {
-  const { name, username, password, inviteCode } = req.body;
+  const { name, username, password, inviteCode, deviceInfo } = req.body;
 
   if (!name || !username || !password || !inviteCode) {
     return res.status(400).json({ error: 'Заполни все поля' });
@@ -122,6 +131,26 @@ app.post('/api/register', async (req, res) => {
 
   const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
   const userAgent = req.headers['user-agent'];
+
+  // Проверка страны по IP
+  try {
+    const ipToCheck = ipAddress.includes(',') ? ipAddress.split(',')[0].trim() : ipAddress;
+    const ipClean = ipToCheck.replace('::ffff:', '');
+    
+    if (ipClean !== '127.0.0.1' && ipClean !== 'localhost' && !ipClean.startsWith('192.168')) {
+      const geoResponse = await fetch(`http://ip-api.com/json/${ipClean}?fields=status,country,countryCode`);
+      const geoData = await geoResponse.json();
+      
+      if (geoData.status === 'success') {
+        const cis = ['RU', 'BY', 'KZ', 'AM', 'AZ', 'KG', 'MD', 'TJ', 'TM', 'UZ', 'UA'];
+        if (!cis.includes(geoData.countryCode)) {
+          return res.status(403).json({ error: 'Выключите VPN для продолжения использования сайтом!' });
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Ошибка проверки IP:', error);
+  }
 
   try {
     // Проверяем инвайт код
@@ -166,8 +195,28 @@ app.post('/api/register', async (req, res) => {
         // Отмечаем инвайт код как использованный
         db.run('UPDATE invite_codes SET used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?', [newUserId, inviteCode]);
 
-        // Сохраняем устройство
-        db.run('INSERT INTO user_devices (user_id, ip_address, user_agent) VALUES (?, ?, ?)', [newUserId, ipAddress, userAgent]);
+        // Сохраняем устройство с полной информацией
+        const devInfo = deviceInfo || {};
+        db.run(`INSERT INTO user_devices (
+          user_id, ip_address, user_agent, device_info, 
+          screen_resolution, timezone, platform, 
+          battery_level, battery_charging, device_memory, 
+          hardware_concurrency, connection_type, language
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+          newUserId, 
+          ipAddress, 
+          userAgent,
+          JSON.stringify(devInfo),
+          devInfo.screenResolution || null,
+          devInfo.timezone || null,
+          devInfo.platform || null,
+          devInfo.batteryLevel || null,
+          devInfo.batteryCharging ? 1 : 0,
+          devInfo.deviceMemory || null,
+          devInfo.hardwareConcurrency || null,
+          devInfo.connectionType || null,
+          devInfo.language || null
+        ]);
 
         // Получаем данные созданного пользователя
         db.get('SELECT id, name, username, is_admin, is_banned, subscription_until, created_at FROM users WHERE id = ?', [newUserId], (err, user) => {
@@ -202,47 +251,87 @@ app.post('/api/login', (req, res) => {
   const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
   const userAgent = req.headers['user-agent'];
 
-  db.get('SELECT * FROM users WHERE username = ?', [username.toLowerCase()], async (err, user) => {
-    if (err) {
-      return res.status(500).json({ error: 'Ошибка сервера' });
-    }
-
-    if (!user) {
-      return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
-    }
-
-    // Проверка на бан
-    if (user.is_banned === 1) {
-      return res.status(403).json({ error: 'Ваш аккаунт заблокирован' });
-    }
-
+  // Проверка страны по IP
+  const checkCountryAndLogin = async () => {
     try {
-      const match = await bcrypt.compare(password, user.password);
+      const ipToCheck = ipAddress.includes(',') ? ipAddress.split(',')[0].trim() : ipAddress;
+      const ipClean = ipToCheck.replace('::ffff:', '');
       
-      if (!match) {
+      if (ipClean !== '127.0.0.1' && ipClean !== 'localhost' && !ipClean.startsWith('192.168')) {
+        const geoResponse = await fetch(`http://ip-api.com/json/${ipClean}?fields=status,country,countryCode`);
+        const geoData = await geoResponse.json();
+        
+        if (geoData.status === 'success') {
+          const cis = ['RU', 'BY', 'KZ', 'AM', 'AZ', 'KG', 'MD', 'TJ', 'TM', 'UZ', 'UA'];
+          if (!cis.includes(geoData.countryCode)) {
+            return res.status(403).json({ error: 'Выключите VPN для продолжения использования сайтом!' });
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Ошибка проверки IP:', error);
+    }
+
+    db.get('SELECT * FROM users WHERE username = ?', [username.toLowerCase()], async (err, user) => {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+
+      if (!user) {
         return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
       }
 
-      // Обновляем устройство или добавляем новое
-      db.run(`INSERT INTO user_devices (user_id, ip_address, user_agent, last_login) 
-              VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-              ON CONFLICT(user_id, ip_address, user_agent) 
-              DO UPDATE SET last_login = CURRENT_TIMESTAMP`,
-              [user.id, ipAddress, userAgent]);
+      // Проверка на бан
+      if (user.is_banned === 1) {
+        return res.status(403).json({ error: 'Ваш аккаунт заблокирован' });
+      }
 
-      res.json({
-        id: user.id,
-        name: user.name,
-        username: user.username,
-        isAdmin: user.is_admin === 1,
-        isBanned: user.is_banned === 1,
-        subscriptionUntil: user.subscription_until,
-        created: new Date(user.created_at).toLocaleDateString('ru')
-      });
-    } catch (error) {
-      res.status(500).json({ error: 'Ошибка сервера' });
-    }
-  });
+      try {
+        const match = await bcrypt.compare(password, user.password);
+        
+        if (!match) {
+          return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
+        }
+
+        // Обновляем устройство с полной информацией
+        const devInfo = req.body.deviceInfo || {};
+        db.run(`INSERT INTO user_devices (
+          user_id, ip_address, user_agent, device_info, 
+          screen_resolution, timezone, platform, 
+          battery_level, battery_charging, device_memory, 
+          hardware_concurrency, connection_type, language, last_login
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, [
+          user.id, 
+          ipAddress, 
+          userAgent,
+          JSON.stringify(devInfo),
+          devInfo.screenResolution || null,
+          devInfo.timezone || null,
+          devInfo.platform || null,
+          devInfo.batteryLevel || null,
+          devInfo.batteryCharging ? 1 : 0,
+          devInfo.deviceMemory || null,
+          devInfo.hardwareConcurrency || null,
+          devInfo.connectionType || null,
+          devInfo.language || null
+        ]);
+
+        res.json({
+          id: user.id,
+          name: user.name,
+          username: user.username,
+          isAdmin: user.is_admin === 1,
+          isBanned: user.is_banned === 1,
+          subscriptionUntil: user.subscription_until,
+          created: new Date(user.created_at).toLocaleDateString('ru')
+        });
+      } catch (error) {
+        res.status(500).json({ error: 'Ошибка сервера' });
+      }
+    });
+  };
+
+  checkCountryAndLogin();
 });
 
 // Главная страница
@@ -418,6 +507,28 @@ app.post('/api/admin/subscription', (req, res) => {
         return res.status(500).json({ error: 'Ошибка обновления' });
       }
       res.json({ success: true, subscriptionUntil: subscriptionUntil.toISOString() });
+    });
+  });
+});
+
+// API: Выдать/забрать админку
+app.post('/api/admin/toggle-admin', (req, res) => {
+  const { adminId, userId, makeAdmin } = req.body;
+
+  db.get('SELECT is_admin FROM users WHERE id = ?', [adminId], (err, admin) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!admin || admin.is_admin !== 1) {
+      return res.status(403).json({ error: 'Доступ запрещен' });
+    }
+
+    db.run('UPDATE users SET is_admin = ? WHERE id = ?', [makeAdmin ? 1 : 0, userId], function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка обновления' });
+      }
+      res.json({ success: true });
     });
   });
 });
