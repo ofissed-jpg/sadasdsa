@@ -631,40 +631,79 @@
     function hideTyping() { const el = document.getElementById('typing'); if (el) el.remove(); }
 
     function send() {
-  const text = inp.value.trim();
-  if (!text || sbtn.disabled) return;
+      const text = inp.value.trim();
+      if (!text || sbtn.disabled) return;
 
-  addMsg(text, 'user');
-  inp.value = '';
-  inp.style.height = 'auto';
-  sbtn.disabled = true;
-  showTyping();
+      addMsg(text, 'user');
+      inp.value = '';
+      inp.style.height = 'auto';
+      sbtn.disabled = true;
+      showTyping();
 
-  const settings = loadSettings();
-  const user = getSession();
+      const s = loadSettings();
 
-  fetch(`${API_URL}/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      prompt: text,
-      mode: settings.mode,
-      userId: user.id,
-      deviceInfo: window.getDeviceInfo ? window.getDeviceInfo() : {}
-    })
-  })
-  .then(r => r.json())
-  .then(data => {
-    hideTyping();
-    addMsg(data.text || 'Ошибка', 'ai');
-    sbtn.disabled = false;
-  })
-  .catch(() => {
-    hideTyping();
-    addMsg('Ошибка соединения', 'ai');
-    sbtn.disabled = false;
-  });
-}
+      fetch(`${API_URL}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: text,
+          mode: s.mode,
+          userId: user.id
+        })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.error) {
+          hideTyping();
+          addMsg('Ошибка: ' + data.error, 'ai');
+          sbtn.disabled = false;
+          inp.focus();
+          return;
+        }
+        pollForAnswer(data.id);
+      })
+      .catch(error => {
+        hideTyping();
+        addMsg('Ошибка соединения с сервером', 'ai');
+        sbtn.disabled = false;
+        inp.focus();
+        console.error('Ошибка:', error);
+      });
+    }
+
+    function pollForAnswer(requestId) {
+      const POLL_INTERVAL = 3000; // 3 сек
+
+      const poll = () => {
+        fetch(`${API_URL}/generate/status/${requestId}`)
+          .then(res => res.json())
+          .then(data => {
+            if (data.error) {
+              hideTyping();
+              addMsg('Ошибка: ' + data.error, 'ai');
+              sbtn.disabled = false;
+              inp.focus();
+              return;
+            }
+            if (data.status === 'answered') {
+              hideTyping();
+              addMsg(data.text, 'ai');
+              sbtn.disabled = false;
+              inp.focus();
+              return;
+            }
+            // ещё не отвечено — пробуем снова
+            setTimeout(poll, POLL_INTERVAL);
+          })
+          .catch(error => {
+            console.error('Ошибка опроса статуса:', error);
+            // временная ошибка сети — пробуем снова, не сбрасываем ожидание
+            setTimeout(poll, POLL_INTERVAL);
+          });
+      };
+
+      poll();
+    }
 
     sbtn.addEventListener('click', send);
     inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -741,15 +780,12 @@
 
 
 
-function  {
+function switchAdminTab(tab) {
   const user = getSession();
   if (!user || !user.isAdmin) return;
-  
+
   // removed auto-open
   loadAdminInvites(user.id);
-  
-}
-
 
   if (tab === 'invites') {
     document.querySelectorAll('.admin-tab')[0].classList.add('active');
