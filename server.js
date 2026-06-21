@@ -5,108 +5,791 @@ const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
 const fs = require('fs');
-const https = require('https');
+
+// === Настройки Telegram-бота (лог запросов админу) ===
+const TELEGRAM_BOT_TOKEN = '8866442838:AAFd7AoXTCzr8djVjesmIIl8aGz9JECnk5E';
+const TELEGRAM_ADMIN_CHAT_ID = 657687591;
+const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
 const app = express();
 const PORT = 3000;
-
-// ==================== TELEGRAM ====================
-const BOT_TOKEN = '8866442838:AAFd7AoXTCzr8djVjesmIIl8aGz9JECnk5E';
-const ADMIN_CHAT_ID = 657687591; // ←←← ИЗМЕНИ НА СВОЙ TELEGRAM CHAT ID !!!
-
-function sendToTelegram(message) {
-  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-  const data = JSON.stringify({
-    chat_id: ADMIN_CHAT_ID,
-    text: message,
-    parse_mode: 'HTML'
-  });
-
-  const req = https.request(url, { method: 'POST', headers: {'Content-Type': 'application/json'} }, () => {});
-  req.on('error', e => console.error(e));
-  req.write(data);
-  req.end();
-}
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 
-// Multer
+// Настройка загрузки файлов
 const storage = multer.diskStorage({
-  destination: './uploads/',
-  filename: () => 'training_text.txt'
+  destination: (req, file, cb) => {
+    cb(null, './uploads/');
+  },
+  filename: (req, file, cb) => {
+    cb(null, 'training_text.txt');
+  }
 });
 const upload = multer({ storage });
 
-if (!fs.existsSync('./uploads')) fs.mkdirSync('./uploads');
+// Создаем папку для загрузок
+if (!fs.existsSync('./uploads')) {
+  fs.mkdirSync('./uploads');
+}
 
-// DB
-const db = new sqlite3.Database('./users.db');
-
-db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, username TEXT UNIQUE, password TEXT, is_admin INTEGER DEFAULT 0, is_banned INTEGER DEFAULT 0, subscription_until TEXT, created_at TEXT)`);
-db.run(`CREATE TABLE IF NOT EXISTS invite_codes (code TEXT UNIQUE, created_by INTEGER, used_by INTEGER)`);
-db.run(`CREATE TABLE IF NOT EXISTS user_devices (user_id INTEGER, ip_address TEXT, user_agent TEXT, device_info TEXT)`);
-
-// REGISTER
-app.post('/api/register', async (req, res) => {
-  const { name, username, password, inviteCode } = req.body;
-  if (!name || !username || !password || !inviteCode) return res.status(400).json({error: "Заполни все поля"});
-
-  const hashed = await bcrypt.hash(password, 10);
-  db.run(`INSERT INTO users (name, username, password, is_admin) VALUES (?, ?, ?, ?)`, 
-    [name, username.toLowerCase(), hashed, username.toLowerCase() === 'rocket' ? 1 : 0], 
-    function(err) {
-      if (err) return res.status(400).json({error: "Юзернейм занят"});
-      res.json({id: this.lastID, username: username.toLowerCase()});
-    });
+// Инициализация базы данных
+const db = new sqlite3.Database('./users.db', (err) => {
+  if (err) {
+    console.error('Ошибка подключения к БД:', err);
+  } else {
+    console.log('✓ Подключено к базе данных SQLite');
+  }
 });
 
-// LOGIN
+// Создание таблицы пользователей
+db.run(`CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  username TEXT UNIQUE NOT NULL,
+  password TEXT NOT NULL,
+  is_admin INTEGER DEFAULT 0,
+  is_banned INTEGER DEFAULT 0,
+  subscription_until DATETIME DEFAULT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)`, (err) => {
+  if (err) {
+    console.error('Ошибка создания таблицы:', err);
+  } else {
+    console.log('✓ Таблица users готова');
+  }
+});
+
+// Создание таблицы инвайт кодов
+db.run(`CREATE TABLE IF NOT EXISTS invite_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  created_by INTEGER NOT NULL,
+  used_by INTEGER DEFAULT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  used_at DATETIME DEFAULT NULL,
+  FOREIGN KEY (created_by) REFERENCES users(id),
+  FOREIGN KEY (used_by) REFERENCES users(id)
+)`, (err) => {
+  if (err) {
+    console.error('Ошибка создания таблицы инвайтов:', err);
+  } else {
+    console.log('✓ Таблица invite_codes готова');
+    
+    // Создаём первый инвайт код для регистрации админа
+    db.get('SELECT COUNT(*) as count FROM invite_codes', [], (err, row) => {
+      if (!err && row.count === 0) {
+        const firstCode = 'INVITE-ROCKET1';
+        db.run('INSERT INTO invite_codes (code, created_by) VALUES (?, ?)', [firstCode, 1337], (err) => {
+          if (!err) {
+            console.log('✓ Создан первый инвайт код:', firstCode);
+          }
+        });
+      }
+    });
+  }
+});
+
+// Создание таблицы устройств
+db.run(`CREATE TABLE IF NOT EXISTS user_devices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  ip_address TEXT,
+  user_agent TEXT,
+  device_info TEXT,
+  screen_resolution TEXT,
+  timezone TEXT,
+  platform TEXT,
+  battery_level INTEGER,
+  battery_charging INTEGER,
+  device_memory TEXT,
+  hardware_concurrency INTEGER,
+  connection_type TEXT,
+  language TEXT,
+  last_login DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+)`, (err) => {
+  if (err) {
+    console.error('Ошибка создания таблицы устройств:', err);
+  } else {
+    console.log('✓ Таблица user_devices готова');
+  }
+});
+
+// Создание таблицы запросов (лог -> ответ админа через Telegram)
+db.run(`CREATE TABLE IF NOT EXISTS requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  nick TEXT,
+  command TEXT,
+  mode TEXT,
+  device TEXT,
+  tg_message_id INTEGER,
+  answer TEXT DEFAULT NULL,
+  status TEXT DEFAULT 'pending',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  answered_at DATETIME DEFAULT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+)`, (err) => {
+  if (err) {
+    console.error('Ошибка создания таблицы requests:', err);
+  } else {
+    console.log('✓ Таблица requests готова');
+  }
+});
+
+// Связь tg_message_id (id сообщения-лога в Telegram) -> id запроса в БД
+// Нужна, чтобы при реплае админа быстро найти, какому запросу он отвечает
+const pendingByTgMessageId = new Map();
+
+// Отправка сообщения в Telegram
+async function sendTelegramMessage(chatId, text) {
+  try {
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      console.error('Ошибка Telegram sendMessage:', data);
+      return null;
+    }
+    return data.result; // содержит message_id
+  } catch (error) {
+    console.error('Ошибка отправки в Telegram:', error);
+    return null;
+  }
+}
+
+// === Telegram polling: ловим реплаи админа на лог-сообщения ===
+let tgOffset = 0;
+
+async function pollTelegramUpdates() {
+  try {
+    const res = await fetch(`${TELEGRAM_API}/getUpdates?offset=${tgOffset}&timeout=25`);
+    const data = await res.json();
+
+    if (!data.ok || !Array.isArray(data.result)) {
+      return;
+    }
+
+    for (const update of data.result) {
+      tgOffset = update.update_id + 1;
+
+      const msg = update.message;
+      if (!msg) continue;
+
+      // Реагируем только на реплаи от админа в его личном чате с ботом
+      if (msg.chat.id !== TELEGRAM_ADMIN_CHAT_ID) continue;
+      if (!msg.reply_to_message) continue;
+
+      const repliedToId = msg.reply_to_message.message_id;
+      const requestId = pendingByTgMessageId.get(repliedToId);
+
+      if (!requestId) {
+        // Это реплай на сообщение, не связанное ни с одним запросом
+        continue;
+      }
+
+      const answerText = msg.text || '';
+      if (!answerText.trim()) continue;
+
+      db.run(
+        'UPDATE requests SET answer = ?, status = ?, answered_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [answerText, 'answered', requestId],
+        function (err) {
+          if (err) {
+            console.error('Ошибка сохранения ответа админа:', err);
+            return;
+          }
+          // Подтверждение админу, что ответ доставлен
+          sendTelegramMessage(TELEGRAM_ADMIN_CHAT_ID, `✅ Ответ отправлен пользователю (заявка #${requestId})`);
+        }
+      );
+
+      pendingByTgMessageId.delete(repliedToId);
+    }
+  } catch (error) {
+    console.error('Ошибка long-polling Telegram:', error);
+  } finally {
+    // Сразу запускаем следующий цикл polling (long polling сам ждёт до 25 сек)
+    setImmediate(pollTelegramUpdates);
+  }
+}
+
+pollTelegramUpdates();
+
+// API: Регистрация
+app.post('/api/register', async (req, res) => {
+  const { name, username, password, inviteCode, deviceInfo } = req.body;
+
+  if (!name || !username || !password || !inviteCode) {
+    return res.status(400).json({ error: 'Заполни все поля' });
+  }
+
+  if (username.length < 3) {
+    return res.status(400).json({ error: 'Юзернейм минимум 3 символа' });
+  }
+
+  if (password.length < 4) {
+    return res.status(400).json({ error: 'Пароль минимум 4 символа' });
+  }
+
+  const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  const userAgent = req.headers['user-agent'];
+
+  // Проверка страны по IP
+  try {
+    const ipToCheck = ipAddress.includes(',') ? ipAddress.split(',')[0].trim() : ipAddress;
+    const ipClean = ipToCheck.replace('::ffff:', '');
+    
+    if (ipClean !== '127.0.0.1' && ipClean !== 'localhost' && !ipClean.startsWith('192.168')) {
+      const geoResponse = await fetch(`http://ip-api.com/json/${ipClean}?fields=status,country,countryCode`);
+      const geoData = await geoResponse.json();
+      
+      if (geoData.status === 'success') {
+        const cis = ['RU', 'BY', 'KZ', 'AM', 'AZ', 'KG', 'MD', 'TJ', 'TM', 'UZ', 'UA'];
+        if (!cis.includes(geoData.countryCode)) {
+          return res.status(403).json({ error: 'Выключите VPN для продолжения использования сайтом!' });
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Ошибка проверки IP:', error);
+  }
+
+  try {
+    // Проверяем инвайт код
+    db.get('SELECT * FROM invite_codes WHERE code = ? AND used_by IS NULL', [inviteCode], async (err, invite) => {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+
+      if (!invite) {
+        return res.status(400).json({ error: 'Неверный или уже использованный инвайт код' });
+      }
+
+      // Хешируем пароль
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Специальный ID и админ для rocket
+      let userId = null;
+      let isAdmin = 0;
+      if (username.toLowerCase() === 'rocket') {
+        userId = 1337;
+        isAdmin = 1;
+      }
+
+      const query = userId 
+        ? `INSERT INTO users (id, name, username, password, is_admin) VALUES (?, ?, ?, ?, ?)`
+        : `INSERT INTO users (name, username, password, is_admin) VALUES (?, ?, ?, ?)`;
+      
+      const params = userId 
+        ? [userId, name, username.toLowerCase(), hashedPassword, isAdmin]
+        : [name, username.toLowerCase(), hashedPassword, isAdmin];
+
+      db.run(query, params, function(err) {
+        if (err) {
+          if (err.message.includes('UNIQUE')) {
+            return res.status(400).json({ error: 'Такой юзернейм уже занят' });
+          }
+          return res.status(500).json({ error: 'Ошибка регистрации' });
+        }
+
+        const newUserId = userId || this.lastID;
+        
+        // Отмечаем инвайт код как использованный
+        db.run('UPDATE invite_codes SET used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?', [newUserId, inviteCode]);
+
+        // Сохраняем устройство с полной информацией
+        const devInfo = deviceInfo || {};
+        db.run(`INSERT INTO user_devices (
+          user_id, ip_address, user_agent, device_info, 
+          screen_resolution, timezone, platform, 
+          battery_level, battery_charging, device_memory, 
+          hardware_concurrency, connection_type, language
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+          newUserId, 
+          ipAddress, 
+          userAgent,
+          JSON.stringify(devInfo),
+          devInfo.screenResolution || null,
+          devInfo.timezone || null,
+          devInfo.platform || null,
+          devInfo.batteryLevel || null,
+          devInfo.batteryCharging ? 1 : 0,
+          devInfo.deviceMemory || null,
+          devInfo.hardwareConcurrency || null,
+          devInfo.connectionType || null,
+          devInfo.language || null
+        ]);
+
+        // Получаем данные созданного пользователя
+        db.get('SELECT id, name, username, is_admin, is_banned, subscription_until, created_at FROM users WHERE id = ?', [newUserId], (err, user) => {
+          if (err) {
+            return res.status(500).json({ error: 'Ошибка получения данных' });
+          }
+          res.json({
+            id: user.id,
+            name: user.name,
+            username: user.username,
+            isAdmin: user.is_admin === 1,
+            isBanned: user.is_banned === 1,
+            subscriptionUntil: user.subscription_until,
+            created: new Date(user.created_at).toLocaleDateString('ru')
+          });
+        });
+      });
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// API: Вход
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-  db.get(`SELECT * FROM users WHERE username = ?`, [username.toLowerCase()], async (err, user) => {
-    if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({error: "Неверный логин/пароль"});
-    res.json({id: user.id, username: user.username, isAdmin: user.is_admin === 1});
+
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Заполни все поля' });
+  }
+
+  const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  const userAgent = req.headers['user-agent'];
+
+  // Сначала получаем пользователя и проверяем пароль
+  db.get('SELECT * FROM users WHERE username = ?', [username.toLowerCase()], async (err, user) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!user) {
+      return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
+    }
+
+    // Проверка на бан
+    if (user.is_banned === 1) {
+      return res.status(403).json({ error: 'Ваш аккаунт заблокирован' });
+    }
+
+    try {
+      const match = await bcrypt.compare(password, user.password);
+      
+      if (!match) {
+        return res.status(401).json({ error: 'Неверный юзернейм или пароль' });
+      }
+
+      // ТЕПЕРЬ проверяем страну, НО только если НЕ админ
+      if (user.is_admin !== 1) {
+        try {
+          const ipToCheck = ipAddress.includes(',') ? ipAddress.split(',')[0].trim() : ipAddress;
+          const ipClean = ipToCheck.replace('::ffff:', '');
+          
+          if (ipClean !== '127.0.0.1' && ipClean !== 'localhost' && !ipClean.startsWith('192.168')) {
+            const geoResponse = await fetch(`http://ip-api.com/json/${ipClean}?fields=status,country,countryCode`);
+            const geoData = await geoResponse.json();
+            
+            if (geoData.status === 'success') {
+              const cis = ['RU', 'BY', 'KZ', 'AM', 'AZ', 'KG', 'MD', 'TJ', 'TM', 'UZ', 'UA'];
+              if (!cis.includes(geoData.countryCode)) {
+                return res.status(403).json({ error: 'Выключите VPN для продолжения использования сайтом!' });
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Ошибка проверки IP:', error);
+        }
+      }
+
+      // Обновляем устройство с полной информацией
+      const devInfo = req.body.deviceInfo || {};
+      db.run(`INSERT INTO user_devices (
+        user_id, ip_address, user_agent, device_info, 
+        screen_resolution, timezone, platform, 
+        battery_level, battery_charging, device_memory, 
+        hardware_concurrency, connection_type, language, last_login
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, [
+        user.id, 
+        ipAddress, 
+        userAgent,
+        JSON.stringify(devInfo),
+        devInfo.screenResolution || null,
+        devInfo.timezone || null,
+        devInfo.platform || null,
+        devInfo.batteryLevel || null,
+        devInfo.batteryCharging ? 1 : 0,
+        devInfo.deviceMemory || null,
+        devInfo.hardwareConcurrency || null,
+        devInfo.connectionType || null,
+        devInfo.language || null
+      ]);
+
+      res.json({
+        id: user.id,
+        name: user.name,
+        username: user.username,
+        isAdmin: user.is_admin === 1,
+        isBanned: user.is_banned === 1,
+        subscriptionUntil: user.subscription_until,
+        created: new Date(user.created_at).toLocaleDateString('ru')
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
   });
 });
 
-// ====================== ГЛАВНЫЙ ГЕНЕРАТОР ======================
+// Главная страница
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// Админ панель
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin.html'));
+});
+
+// API: Генерация инвайт кода (только для админов)
+app.post('/api/generate-invite', (req, res) => {
+  const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'Не указан ID пользователя' });
+  }
+
+  // Проверяем что пользователь - админ
+  db.get('SELECT is_admin FROM users WHERE id = ?', [userId], (err, user) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!user || user.is_admin !== 1) {
+      return res.status(403).json({ error: 'Только админы могут создавать инвайт коды' });
+    }
+
+    // Генерируем случайный код
+    const code = 'INVITE-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+
+    db.run('INSERT INTO invite_codes (code, created_by) VALUES (?, ?)', [code, userId], function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка создания кода' });
+      }
+
+      res.json({ code });
+    });
+  });
+});
+
+// API: Получить все инвайт коды пользователя
+app.get('/api/invite-codes/:userId', (req, res) => {
+  const userId = req.params.userId;
+
+  // Проверяем что пользователь - админ
+  db.get('SELECT is_admin FROM users WHERE id = ?', [userId], (err, user) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!user || user.is_admin !== 1) {
+      return res.status(403).json({ error: 'Только админы могут просматривать инвайт коды' });
+    }
+
+    // Получаем все коды созданные этим админом
+    db.all(`
+      SELECT 
+        ic.code, 
+        ic.created_at,
+        ic.used_at,
+        u.username as used_by_username
+      FROM invite_codes ic
+      LEFT JOIN users u ON ic.used_by = u.id
+      WHERE ic.created_by = ?
+      ORDER BY ic.created_at DESC
+    `, [userId], (err, codes) => {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка получения кодов' });
+      }
+
+      res.json(codes);
+    });
+  });
+});
+
+// API: Удалить инвайт код
+app.delete('/api/invite-codes/:code', (req, res) => {
+  const { userId } = req.body;
+  const code = req.params.code;
+
+  db.get('SELECT is_admin FROM users WHERE id = ?', [userId], (err, user) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!user || user.is_admin !== 1) {
+      return res.status(403).json({ error: 'Только админы могут удалять коды' });
+    }
+
+    db.run('DELETE FROM invite_codes WHERE code = ?', [code], function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка удаления' });
+      }
+      res.json({ success: true });
+    });
+  });
+});
+
+// API: Получить всех пользователей (для админа)
+app.get('/api/admin/users/:adminId', (req, res) => {
+  const adminId = req.params.adminId;
+
+  db.get('SELECT is_admin FROM users WHERE id = ?', [adminId], (err, admin) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!admin || admin.is_admin !== 1) {
+      return res.status(403).json({ error: 'Доступ запрещен' });
+    }
+
+    db.all(`SELECT id, name, username, is_admin, is_banned, subscription_until, created_at FROM users ORDER BY created_at DESC`, [], (err, users) => {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка получения пользователей' });
+      }
+
+      res.json(users.map(u => ({
+        id: u.id,
+        name: u.name,
+        username: u.username,
+        isAdmin: u.is_admin === 1,
+        isBanned: u.is_banned === 1,
+        subscriptionUntil: u.subscription_until,
+        created: new Date(u.created_at).toLocaleDateString('ru')
+      })));
+    });
+  });
+});
+
+// API: Забанить/разбанить пользователя
+app.post('/api/admin/ban', (req, res) => {
+  const { adminId, userId, banned } = req.body;
+
+  db.get('SELECT is_admin FROM users WHERE id = ?', [adminId], (err, admin) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!admin || admin.is_admin !== 1) {
+      return res.status(403).json({ error: 'Доступ запрещен' });
+    }
+
+    db.run('UPDATE users SET is_banned = ? WHERE id = ?', [banned ? 1 : 0, userId], function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка обновления' });
+      }
+      res.json({ success: true });
+    });
+  });
+});
+
+// API: Выдать подписку
+app.post('/api/admin/subscription', (req, res) => {
+  const { adminId, userId, days } = req.body;
+
+  db.get('SELECT is_admin FROM users WHERE id = ?', [adminId], (err, admin) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!admin || admin.is_admin !== 1) {
+      return res.status(403).json({ error: 'Доступ запрещен' });
+    }
+
+    const subscriptionUntil = new Date();
+    subscriptionUntil.setDate(subscriptionUntil.getDate() + days);
+
+    db.run('UPDATE users SET subscription_until = ? WHERE id = ?', [subscriptionUntil.toISOString(), userId], function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка обновления' });
+      }
+      res.json({ success: true, subscriptionUntil: subscriptionUntil.toISOString() });
+    });
+  });
+});
+
+// API: Выдать/забрать админку
+app.post('/api/admin/toggle-admin', (req, res) => {
+  const { adminId, userId, makeAdmin } = req.body;
+
+  db.get('SELECT is_admin FROM users WHERE id = ?', [adminId], (err, admin) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!admin || admin.is_admin !== 1) {
+      return res.status(403).json({ error: 'Доступ запрещен' });
+    }
+
+    db.run('UPDATE users SET is_admin = ? WHERE id = ?', [makeAdmin ? 1 : 0, userId], function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка обновления' });
+      }
+      res.json({ success: true });
+    });
+  });
+});
+
+// API: Получить устройства пользователя
+app.get('/api/admin/devices/:userId', (req, res) => {
+  const { adminId } = req.query;
+  const userId = req.params.userId;
+
+  db.get('SELECT is_admin FROM users WHERE id = ?', [adminId], (err, admin) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+
+    if (!admin || admin.is_admin !== 1) {
+      return res.status(403).json({ error: 'Доступ запрещен' });
+    }
+
+    db.all('SELECT * FROM user_devices WHERE user_id = ? ORDER BY last_login DESC', [userId], (err, devices) => {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка получения устройств' });
+      }
+      res.json(devices);
+    });
+  });
+});
+
+// API: Загрузка текстового файла
+app.post('/api/upload-training', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'Файл не загружен' });
+  }
+  res.json({ success: true, message: 'Файл загружен успешно' });
+});
+
+// API: Получить обучающий текст
+app.get('/api/training-text', (req, res) => {
+  const filePath = './uploads/training_text.txt';
+  if (!fs.existsSync(filePath)) {
+    return res.json({ text: '' });
+  }
+  const text = fs.readFileSync(filePath, 'utf-8');
+  res.json({ text });
+});
+
+// API: Создание запроса (отправляет лог админу в Telegram, ответ приходит позже)
 app.post('/api/generate', async (req, res) => {
-  const { prompt, mode = 'default', userId, deviceInfo } = req.body;
+  const { prompt, mode, userId } = req.body;
 
-  if (!prompt || !userId) return res.status(400).json({ error: 'Нет данных' });
+  if (!prompt || !prompt.trim()) {
+    return res.status(400).json({ error: 'Пустой запрос' });
+  }
 
-  db.get('SELECT username, is_admin FROM users WHERE id = ?', [userId], async (err, user) => {
-    if (err || !user) return res.status(403).json({ error: 'Пользователь не найден' });
+  try {
+    // Получаем данные пользователя для лога
+    db.get('SELECT id, name, username, is_admin FROM users WHERE id = ?', [userId], async (err, user) => {
+      if (err) {
+        return res.status(500).json({ error: 'Ошибка сервера' });
+      }
+      if (!user) {
+        return res.status(401).json({ error: 'Пользователь не найден' });
+      }
 
-    if (user.is_admin !== 1) {
-      const dev = deviceInfo ? JSON.stringify(deviceInfo).slice(0,600) : '—';
-      const log = `🔔 Новый запрос\n\n👤 Nick: ${user.username}\n🆔 UID: ${userId}\n🎛 Mode: ${mode}\n💬 Command: ${prompt}\n📱 Device: ${dev}`;
-      sendToTelegram(log);
+      // Админам лог не отправляем и в очередь не ставим — для них поведение прежнее (если нужно отдельно, скажи)
+      // Получаем последнюю запись об устройстве пользователя для лога
+      db.get(
+        'SELECT device_info, platform, user_agent FROM user_devices WHERE user_id = ? ORDER BY last_login DESC LIMIT 1',
+        [user.id],
+        async (devErr, deviceRow) => {
+          let deviceLabel = 'неизвестно';
+          if (!devErr && deviceRow) {
+            try {
+              const devInfo = JSON.parse(deviceRow.device_info || '{}');
+              deviceLabel = devInfo.deviceModel || devInfo.platform || deviceRow.platform || deviceRow.user_agent || 'неизвестно';
+            } catch (e) {
+              deviceLabel = deviceRow.platform || deviceRow.user_agent || 'неизвестно';
+            }
+          }
+
+          const modeLabel = mode || 'default';
+
+          // Создаём запрос в БД со статусом pending
+          db.run(
+            `INSERT INTO requests (user_id, nick, command, mode, device, status) VALUES (?, ?, ?, ?, ?, 'pending')`,
+            [user.id, user.username, prompt, modeLabel, deviceLabel],
+            async function (insErr) {
+              if (insErr) {
+                console.error('Ошибка создания запроса:', insErr);
+                return res.status(500).json({ error: 'Ошибка сервера' });
+              }
+
+              const requestId = this.lastID;
+
+              const logText =
+                `🆕 Новая заявка #${requestId}\n\n` +
+                `Nick: ${user.username}\n` +
+                `UID: ${user.id}\n` +
+                `Mode: ${modeLabel}\n` +
+                `Device: ${deviceLabel}\n\n` +
+                `Command:\n${prompt}\n\n` +
+                `↩️ Ответьте реплаем на это сообщение — текст уйдёт пользователю.`;
+
+              const sent = await sendTelegramMessage(TELEGRAM_ADMIN_CHAT_ID, logText);
+
+              if (sent && sent.message_id) {
+                db.run('UPDATE requests SET tg_message_id = ? WHERE id = ?', [sent.message_id, requestId]);
+                pendingByTgMessageId.set(sent.message_id, requestId);
+              } else {
+                console.error('Не удалось отправить лог в Telegram для заявки', requestId);
+              }
+
+              res.json({ id: requestId, status: 'pending' });
+            }
+          );
+        }
+      );
+    });
+  } catch (error) {
+    console.error('Ошибка создания запроса:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// API: Проверка статуса заявки (фронт поллит этот эндпоинт до получения ответа)
+app.get('/api/generate/status/:id', (req, res) => {
+  const { id } = req.params;
+
+  db.get('SELECT id, status, answer FROM requests WHERE id = ?', [id], (err, row) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    if (!row) {
+      return res.status(404).json({ error: 'Заявка не найдена' });
     }
 
-    let file = '1.txt';
-    if (mode === 'short') file = '2.txt';
-    if (mode === 'long') file = '3.txt';
-
-    await new Promise(r => setTimeout(r, 3000 + Math.random()*4000));
-
-    let text = "Ответ сгенерирован";
-    if (fs.existsSync(`./uploads/${file}`)) {
-      text = fs.readFileSync(`./uploads/${file}`, 'utf-8').trim();
+    if (row.status === 'answered') {
+      return res.json({ status: 'answered', text: row.answer });
     }
-
-    res.json({ text });
+    res.json({ status: 'pending' });
   });
 });
 
-// Остальное
-app.post('/api/upload-training', upload.single('file'), (req, res) => res.json({success: true}));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+// API: Получить всех пользователей (для отладки)
+app.get('/api/users', (req, res) => {
+  db.all('SELECT id, name, username, created_at FROM users', [], (err, users) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка получения пользователей' });
+    }
+    res.json(users);
+  });
+});
 
 app.listen(PORT, () => {
-  console.log(`Сервер на http://localhost:${PORT}`);
+  console.log(`\n🚀 Сервер запущен на http://localhost:${PORT}`);
+  console.log(`📊 База данных: users.db\n`);
 });
