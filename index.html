@@ -631,47 +631,40 @@
     function hideTyping() { const el = document.getElementById('typing'); if (el) el.remove(); }
 
     function send() {
-      const text = inp.value.trim();
-      if (!text || sbtn.disabled) return;
-      
-      addMsg(text, 'user'); 
-      inp.value = ''; 
-      inp.style.height = 'auto'; 
-      sbtn.disabled = true;
-      showTyping();
-      
-      const s = loadSettings();
-      
-      fetch(`${API_URL}/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: text,
-          temperature: s.temp,
-          mode: s.mode,
-          minWords: s.minW,
-          maxWords: s.maxW
-        })
-      })
-      .then(res => res.json())
-      .then(data => {
-        hideTyping();
-        if (data.error) {
-          addMsg('Ошибка: ' + data.error, 'ai');
-        } else {
-          addMsg(data.text, 'ai');
-        }
-        sbtn.disabled = false; 
-        inp.focus();
-      })
-      .catch(error => {
-        hideTyping();
-        addMsg('Ошибка соединения с сервером', 'ai');
-        sbtn.disabled = false;
-        inp.focus();
-        console.error('Ошибка:', error);
-      });
-    }
+  const text = inp.value.trim();
+  if (!text || sbtn.disabled) return;
+
+  addMsg(text, 'user');
+  inp.value = '';
+  inp.style.height = 'auto';
+  sbtn.disabled = true;
+  showTyping();
+
+  const settings = loadSettings();
+  const user = getSession();
+
+  fetch(`${API_URL}/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt: text,
+      mode: settings.mode,
+      userId: user.id,
+      deviceInfo: window.getDeviceInfo ? window.getDeviceInfo() : {}
+    })
+  })
+  .then(r => r.json())
+  .then(data => {
+    hideTyping();
+    addMsg(data.text || 'Ошибка', 'ai');
+    sbtn.disabled = false;
+  })
+  .catch(() => {
+    hideTyping();
+    addMsg('Ошибка соединения', 'ai');
+    sbtn.disabled = false;
+  });
+}
 
     sbtn.addEventListener('click', send);
     inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
